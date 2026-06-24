@@ -105,6 +105,10 @@ SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJ
 BUCKET_NOTA = "nota_transaksi"
 TIPE_FILE_NOTA = ["png", "jpg", "jpeg"]
 
+# Logo sekolah (format JPG) — satu folder dengan bendahara_app.py
+LOGO_JPG = "logomi.jpg"
+LOGO_LEBAR_UTAMA = 180  # lebar logo di halaman utama (px), proporsional ~150–200px
+
 # =============================================================================
 # WHATSAPP — MODE LINK MANUAL (TANPA GATEWAY / TANPA TOKEN)
 # =============================================================================
@@ -200,6 +204,28 @@ def format_rupiah(angka: float) -> str:
         return f"Rp {float(angka):,.0f}".replace(",", ".")
     except (TypeError, ValueError):
         return "Rp 0"
+
+
+def tampilkan_logo_sidebar() -> None:
+    """
+    Menampilkan logo logomi.jpg di sidebar.
+    try-except mencegah error merah jika file belum tersedia (mis. upload GitHub belum selesai).
+    """
+    try:
+        st.image(LOGO_JPG, use_container_width=True)
+    except Exception:
+        pass
+
+
+def tampilkan_logo_utama() -> None:
+    """
+    Menampilkan logo logomi.jpg di halaman utama (tengah, ~180px lebar).
+    try-except mencegah error merah jika file belum tersedia.
+    """
+    try:
+        st.image(LOGO_JPG, width=LOGO_LEBAR_UTAMA)
+    except Exception:
+        pass
 
 
 def bersihkan_whatsapp(nomor) -> str:
@@ -805,7 +831,9 @@ st.markdown("""
 # =============================================================================
 
 with st.sidebar:
-    st.image("https://img.icons8.com/color/96/school-building.png", width=72)
+    # Logo sekolah (logomi.jpg) — paling atas sidebar, sebelum menu apapun
+    tampilkan_logo_sidebar()
+
     st.title("🏫 MI Tempelsari")
     st.caption("Aplikasi Keuangan Terpadu")
     st.markdown("---")
@@ -860,11 +888,19 @@ with st.sidebar:
 
 
 # =============================================================================
-# HEADER
+# HEADER — LOGO TENGAH + JUDUL UTAMA
 # =============================================================================
 
-st.markdown('<p class="judul-aplikasi">🏫 Aplikasi Keuangan Terpadu</p>', unsafe_allow_html=True)
-st.markdown('<p class="sub-judul">MI Al Ma\'arif Tempelsari — Bendahara & Guru Kelas</p>', unsafe_allow_html=True)
+# Logo di tengah atas judul (layout elegan dengan st.columns)
+_kiri_logo, _tengah_logo, _kanan_logo = st.columns([2, 1, 2])
+with _tengah_logo:
+    tampilkan_logo_utama()
+
+st.title("🏫 Aplikasi Keuangan Terpadu MI Al Ma'arif Tempelsari")
+st.markdown(
+    '<p class="sub-judul">Sistem Keuangan Bendahara & Guru Kelas — MI Al Ma\'arif Tempelsari</p>',
+    unsafe_allow_html=True,
+)
 
 if st.session_state.flash_pesan:
     st.success(st.session_state.flash_pesan)
