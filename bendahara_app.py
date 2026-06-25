@@ -88,9 +88,12 @@
 # =============================================================================
 
 import io
+import json
 import uuid
+import base64
 import urllib.parse
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import plotly.express as px
 from datetime import date, datetime
@@ -108,6 +111,9 @@ TIPE_FILE_NOTA = ["png", "jpg", "jpeg"]
 # Logo sekolah (format JPG) — satu folder dengan bendahara_app.py
 LOGO_JPG = "logomi.jpg"
 LOGO_LEBAR_UTAMA = 180  # lebar logo di halaman utama (px), proporsional ~150–200px
+
+# Kunci LocalStorage browser untuk antrean data offline (HP guru)
+OFFLINE_LS_KEY = "mi_tempelsari_offline_queue"
 
 # =============================================================================
 # WHATSAPP — MODE LINK MANUAL (TANPA GATEWAY / TANPA TOKEN)
@@ -309,6 +315,10 @@ def muat_ulang_aplikasi():
     st.rerun()
 
 
+# =============================================================================
+# PENANGANAN OFFLINE — LocalStorage browser + antrean session_state
+# =============================================================================
+
 def init_session_state():
     defaults = {
         "authenticated": False,
@@ -319,10 +329,254 @@ def init_session_state():
         "flash_pesan": None,
         "wa_draft_link": None,
         "wa_draft_label": None,
+        "offline_queue": [],
+        "browser_online": True,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
+
+
+def cek_koneksi_internet() -> bool:
+    """
+    Mengecek koneksi ke Supabase Cloud (server-side).
+    Digunakan saat tombol Simpan / Sinkronkan ditekan.
+    """
+    try:
+        koneksi_supabase().table("tabel_master_siswa").select("id").limit(1).execute()
+        return True
+    except Exception:
+        return False
+
+
+def gabung_antrean_dari_url() -> None:
+    """Tarik antrean offline dari LocalStorage browser lewat parameter URL (sekali)."""
+    if "offline_data" not in st.query_params:
+        return
+    try:
+        encoded = st.query_params.get("offline_data")
+        if isinstance(encoded, list):
+            encoded = encoded[0]
+        raw = base64.b64decode(encoded).decode("utf-8")
+        antrean_browser = json.loads(raw)
+        if not isinstance(antrean_browser, list):
+            return
+
+        id_ada = {x.get("id") for x in st.session_state.offline_queue}
+        for item in antrean_browser:
+            if item.get("id") not in id_ada:
+                st.session_state.offline_queue.append(item)
+                id_ada.add(item.get("id"))
+
+        del st.query_params["offline_data"]
+    except Exception:
+        pass
+
+
+def _js_escape_json(data) -> str:
+    return json.dumps(data).replace("</", "<\\/")
+
+
+def render_monitor_koneksi_offline() -> None:
+    """
+    Komponen JS: pantau online/offline di browser HP secara berkala.
+    Menarik antrean LocalStorage ke Python saat pertama kali dibuka.
+    """
+    ls_key = OFFLINE_LS_KEY
+    html = f"""
+    <div id="mi-offline-status" style="font-size:0.85rem;padding:6px 0;text-align:center;">
+      Memeriksa koneksi...
+    </div>
+    <script>
+    (function() {{
+        const LS_KEY = "{ls_key}";
+        const el = document.getElementById("mi-offline-status");
+
+        function getQueue() {{
+            try {{
+                return JSON.parse(localStorage.getItem(LS_KEY) || "[]");
+            }} catch (e) {{
+                return [];
+            }}
+        }}
+
+        function updateStatus() {{
+            const online = navigator.onLine;
+            const n = getQueue().length;
+            if (online) {{
+                el.innerHTML = n > 0
+                    ? "🟢 Online · <b>" + n + "</b> draft offline menunggu"
+                    : "🟢 Online";
+                el.style.color = "#1e8449";
+            }} else {{
+                el.innerHTML = n > 0
+                    ? "🔴 Offline · <b>" + n + "</b> draft aman di HP"
+                    : "🔴 Offline";
+                el.style.color = "#c0392b";
+            }}
+        }}
+
+        function pushQueueToPython() {{
+            const q = getQueue();
+            if (!q.length) return;
+            if (sessionStorage.getItem("mi_offline_pushed")) return;
+            try {{
+                const url = new URL(window.top.location.href);
+                if (url.searchParams.has("offline_data")) return;
+                const encoded = btoa(unescape(encodeURIComponent(JSON.stringify(q))));
+                url.searchParams.set("offline_data", encoded);
+                sessionStorage.setItem("mi_offline_pushed", "1");
+                window.top.location.href = url.toString();
+            }} catch (e) {{}}
+        }}
+
+        updateStatus();
+        pushQueueToPython();
+        setInterval(updateStatus, 4000);
+        window.addEventListener("online", updateStatus);
+        window.addEventListener("offline", updateStatus);
+    }})();
+    </script>
+    """
+    try:
+        components.html(html, height=36)
+    except Exception:
+        pass
+
+
+def simpan_ke_localstorage_browser(item: dict) -> None:
+    """Tambahkan satu item ke antrean LocalStorage di browser HP."""
+    item_json = _js_escape_json(item)
+    ls_key = OFFLINE_LS_KEY
+    html = f"""
+    <script>
+    (function() {{
+        const KEY = "{ls_key}";
+        const item = {item_json};
+        try {{
+            let q = JSON.parse(localStorage.getItem(KEY) || "[]");
+            q.push(item);
+            localStorage.setItem(KEY, JSON.stringify(q));
+            sessionStorage.removeItem("mi_offline_pushed");
+        }} catch (e) {{}}
+    }})();
+    </script>
+    """
+    try:
+        components.html(html, height=0)
+    except Exception:
+        pass
+
+
+def bersihkan_localstorage_browser() -> None:
+    """Hapus antrean LocalStorage setelah sinkronisasi berhasil."""
+    ls_key = OFFLINE_LS_KEY
+    html = f"""
+    <script>
+    (function() {{
+        try {{
+            localStorage.setItem("{ls_key}", "[]");
+            sessionStorage.setItem("mi_offline_pushed", "1");
+        }} catch (e) {{}}
+    }})();
+    </script>
+    """
+    try:
+        components.html(html, height=0)
+    except Exception:
+        pass
+
+
+def tambah_antrean_offline(tipe: str, payload: dict) -> dict:
+    """Simpan draft ke session_state + LocalStorage browser."""
+    item = {
+        "id": str(uuid.uuid4()),
+        "type": tipe,
+        "payload": payload,
+        "created_at": datetime.now().isoformat(),
+    }
+    st.session_state.offline_queue.append(item)
+    simpan_ke_localstorage_browser(item)
+    return item
+
+
+def jumlah_antrean_offline() -> int:
+    return len(st.session_state.get("offline_queue", []))
+
+
+def sinkronkan_antrean_offline() -> tuple[int, int]:
+    """
+    Unggah seluruh antrean offline ke Supabase.
+    Mengembalikan (jumlah_sukses, jumlah_gagal).
+    """
+    antrean = list(st.session_state.get("offline_queue", []))
+    sukses = 0
+    gagal = 0
+    sisa = []
+
+    for item in antrean:
+        tipe = item.get("type")
+        payload = item.get("payload", {})
+        ok = False
+
+        if tipe == "pembayaran_siswa":
+            ok = simpan_pembayaran_siswa(**payload)
+        elif tipe == "tabungan_siswa":
+            ok = simpan_tabungan(**payload)
+
+        if ok:
+            sukses += 1
+        else:
+            gagal += 1
+            sisa.append(item)
+
+    st.session_state.offline_queue = sisa
+    return sukses, gagal
+
+
+def simpan_pembayaran_dengan_offline(
+    payload: dict,
+    meta_wa: dict | None = None,
+) -> None:
+    """
+    Simpan pembayaran siswa — online langsung ke Supabase,
+    offline masuk antrean LocalStorage tanpa error merah.
+    """
+    if cek_koneksi_internet():
+        if simpan_pembayaran_siswa(**payload):
+            if meta_wa and meta_wa.get("no_wa"):
+                pesan = pesan_nota_bayar_jawa(meta_wa["nama_siswa"], meta_wa["pos_tagihan"])
+                st.session_state.wa_draft_link = link_whatsapp(meta_wa["no_wa"], pesan)
+                st.session_state.wa_draft_label = (
+                    f"📱 Kirim Nota — {meta_wa['nama_siswa']} ({meta_wa['pos_tagihan']})"
+                )
+            else:
+                st.session_state.wa_draft_link = None
+                st.session_state.wa_draft_label = None
+            st.session_state.flash_pesan = "Pembayaran tersimpan!"
+            muat_ulang_aplikasi()
+            return
+
+    # Internet mati / timeout / gagal kirim — simpan draft offline
+    tambah_antrean_offline("pembayaran_siswa", payload)
+    st.warning(
+        "⚠️ Internet Terputus! Data Anda aman disimpan sementara di memori HP Anda. "
+        "Sinkronkan nanti lewat tombol **🔄 Sinkronkan Data Offline** di sidebar."
+    )
+
+
+def simpan_tabungan_dengan_offline(payload: dict) -> None:
+    """Simpan tabungan siswa — online ke Supabase, offline ke antrean LocalStorage."""
+    if cek_koneksi_internet() and simpan_tabungan(**payload):
+        st.session_state.flash_pesan = "Tabungan tersimpan!"
+        muat_ulang_aplikasi()
+        return
+
+    tambah_antrean_offline("tabungan_siswa", payload)
+    st.warning(
+        "⚠️ Internet Terputus! Data Anda aman disimpan sementara di memori HP Anda. "
+        "Sinkronkan nanti lewat tombol **🔄 Sinkronkan Data Offline** di sidebar."
+    )
 
 
 def indeks_aman(daftar: list, nilai) -> int:
@@ -564,8 +818,7 @@ def simpan_pembayaran_siswa(**data) -> bool:
     try:
         koneksi_supabase().table("tabel_pembayaran_siswa").insert(data).execute()
         return True
-    except Exception as e:
-        st.error(f"Gagal simpan pembayaran: {e}")
+    except Exception:
         return False
 
 
@@ -629,8 +882,7 @@ def simpan_tabungan(**data) -> bool:
     try:
         koneksi_supabase().table("tabel_tabungan_siswa").insert(data).execute()
         return True
-    except Exception as e:
-        st.error(f"Gagal simpan tabungan: {e}")
+    except Exception:
         return False
 
 
@@ -805,6 +1057,7 @@ def buat_excel_laporan_pos(bulan, tahun, ringkasan, laporan_pos: dict) -> bytes:
 # =============================================================================
 
 init_session_state()
+gabung_antrean_dari_url()
 pastikan_bucket_storage()
 
 st.set_page_config(
@@ -860,6 +1113,34 @@ with st.sidebar:
     st.success(f"Login: **{peran}**")
     if st.session_state.remember_me:
         st.caption("✅ Ingat saya aktif")
+
+    # Monitor koneksi internet + tarik draft offline dari LocalStorage browser
+    render_monitor_koneksi_offline()
+
+    # Tombol sinkronisasi — hanya muncul jika ada antrean belum terkirim
+    if jumlah_antrean_offline() > 0:
+        st.caption(f"📦 **{jumlah_antrean_offline()}** data menunggu sinkronisasi")
+        if st.button("🔄 Sinkronkan Data Offline", use_container_width=True, type="primary"):
+            if cek_koneksi_internet():
+                jumlah_ok, jumlah_gagal = sinkronkan_antrean_offline()
+                if jumlah_gagal == 0 and jumlah_ok > 0:
+                    bersihkan_localstorage_browser()
+                    st.session_state.flash_pesan = (
+                        f"✅ {jumlah_ok} data offline berhasil disinkronkan ke Supabase!"
+                    )
+                    muat_ulang_aplikasi()
+                elif jumlah_ok > 0:
+                    st.warning(
+                        f"{jumlah_ok} data berhasil, {jumlah_gagal} gagal — "
+                        "periksa koneksi lalu coba lagi."
+                    )
+                else:
+                    st.warning("Sinkronisasi gagal. Periksa koneksi internet Anda.")
+            else:
+                st.warning(
+                    "⚠️ Internet masih terputus. Pindah ke area ber-sinyal, "
+                    "lalu klik tombol ini lagi."
+                )
 
     if peran == "Guru Kelas":
         st.session_state.kelas_guru = st.selectbox(
@@ -1213,24 +1494,22 @@ elif halaman == MENU_BAYAR:
                 if nominal <= 0:
                     st.warning("Nominal harus lebih dari 0.")
                 else:
-                    berhasil_bayar = simpan_pembayaran_siswa(
-                        siswa_id=int(siswa["id"]), pos_tagihan=pos, nominal=float(nominal),
-                        tanggal=tgl.isoformat(), kelas=kelas, keterangan=ket,
-                        periode_bulan=bulan, periode_tahun=tahun,
-                    )
-                    if berhasil_bayar:
-                        wa = bersihkan_whatsapp(siswa.get("no_whatsapp", ""))
-                        if wa:
-                            pesan = pesan_nota_bayar_jawa(siswa["nama_siswa"], pos)
-                            st.session_state.wa_draft_link = link_whatsapp(wa, pesan)
-                            st.session_state.wa_draft_label = (
-                                f"📱 Kirim Nota — {siswa['nama_siswa']} ({pos})"
-                            )
-                        else:
-                            st.session_state.wa_draft_link = None
-                            st.session_state.wa_draft_label = None
-                        st.session_state.flash_pesan = "Pembayaran tersimpan!"
-                        muat_ulang_aplikasi()
+                    payload = {
+                        "siswa_id": int(siswa["id"]),
+                        "pos_tagihan": pos,
+                        "nominal": float(nominal),
+                        "tanggal": tgl.isoformat(),
+                        "kelas": kelas,
+                        "keterangan": ket,
+                        "periode_bulan": bulan,
+                        "periode_tahun": tahun,
+                    }
+                    meta_wa = {
+                        "nama_siswa": siswa["nama_siswa"],
+                        "pos_tagihan": pos,
+                        "no_wa": bersihkan_whatsapp(siswa.get("no_whatsapp", "")),
+                    }
+                    simpan_pembayaran_dengan_offline(payload, meta_wa)
 
 
 # =============================================================================
@@ -1321,12 +1600,15 @@ elif halaman == MENU_TABUNGAN:
             ket = st.text_input("Keterangan")
             if st.form_submit_button("💾 Simpan", type="primary"):
                 nilai = float(nominal) if jenis == "Setor" else -float(nominal)
-                if simpan_tabungan(
-                    siswa_id=int(siswa["id"]), jenis=jenis, nominal=nilai,
-                    tanggal=tgl.isoformat(), kelas=kelas, keterangan=ket,
-                ):
-                    st.success("Tabungan tersimpan.")
-                    muat_ulang_aplikasi()
+                payload = {
+                    "siswa_id": int(siswa["id"]),
+                    "jenis": jenis,
+                    "nominal": nilai,
+                    "tanggal": tgl.isoformat(),
+                    "kelas": kelas,
+                    "keterangan": ket,
+                }
+                simpan_tabungan_dengan_offline(payload)
 
         df_tab = ambil_tabungan(kelas)
         if not df_tab.empty:
